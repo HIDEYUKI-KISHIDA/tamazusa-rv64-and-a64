@@ -1,0 +1,313 @@
+# Makefile.a64 — Tamazusa の AArch64 版（QEMU virt、GICv3）
+#
+#   RISC-V 版（Makefile）と同じソースを使い、CPU とボードの部分だけ AArch64 のものに替える。
+#   段階 A1: 起動・GICv3・汎用タイマ・PSCI・T-Kernel（プリエンプションあり）。試験は M5〜M7。
+#   段階 A2: MMU（4KiB・39 ビット）、EL0 のユーザープログラム、svc、タスクごとの空間、ELF の読み込み。試験は M8〜M12。
+#   段階 A3: 仮想ディスク（virtio-blk、tar）。試験は M13。続けて Linux 互換層（M18〜）。
+#
+#   make -f Makefile.a64          … ビルド
+#   make -f Makefile.a64 run      … QEMU で動かす（試験が終わると PSCI で QEMU を終える）
+#   make -f Makefile.a64 run EL2=1 … EL2 から降りて起動する場合（実機の U-Boot と同じ入り方）
+#   make -f Makefile.a64 run RUN_SH=1 TEST_EXIT=0 … 試験のあと bash を使う（exit で戻る）
+#   make -f Makefile.a64 clean
+#
+#   make -f Makefile.a64 BOARD=a733 … 実機 Orange Pi 4 Pro（Allwinner A733）用。build-a733/Image ができる
+#     U-Boot の booti で起動する。最初の段階として M5〜M12（起動・GIC・タイマ・PSCI・MMU・EL0）だけを入れる
+
+CROSS   ?= aarch64-linux-gnu-
+CC      := $(CROSS)gcc
+SIZE    := $(CROSS)size
+
+TEST_EXIT ?= 1
+EL2       ?= 0
+RUN_SH    ?= 0
+BOARD     ?= virt
+
+TKERNEL2_ROOT ?= ../../archive/tkernel_2-master
+TKERNEL2_CANDIDATES := ../../archive/tkernel_2-master ../B-Free-master/archive/tkernel_2-master ../tkernel_2
+ifeq ($(wildcard $(TKERNEL2_ROOT)/include/basic.h),)
+  TKERNEL2_FOUND := $(firstword $(foreach d,$(TKERNEL2_CANDIDATES),$(if $(wildcard $(d)/include/basic.h),$(d))))
+  ifneq ($(TKERNEL2_FOUND),)
+    override TKERNEL2_ROOT := $(TKERNEL2_FOUND)
+  endif
+endif
+TK_SRC_DIR := $(TKERNEL2_ROOT)/kernel/tkernel/src
+
+ifeq ($(BOARD),a733)
+B        := build-a733
+else
+B        := build-a64
+endif
+TARGET   := $(B)/tamazusa-a64.elf
+LDSCRIPT := kernel/sysdepend/aarch64/Kernel.ld
+OFFSET_H := kernel/sysdepend/cpu/aarch64/offset.h
+
+TKERNEL_C := tkstart.c timer.c wait.c task.c klock.c task_manage.c task_sync.c \
+             mutex.c subsystem.c objname.c misc_calls.c version.c time_calls.c
+LIBSYS_C  := bitset.c bitclr.c bittest.c
+
+SRCS_S := \
+    kernel/sysdepend/aarch64/reset.S \
+    kernel/sysdepend/cpu/aarch64/exception.S \
+    kernel/sysdepend/cpu/aarch64/cpu_support_tk.S \
+    kernel/sysdepend/cpu/aarch64/mmu_enable.S
+
+SRCS_C := \
+    kernel/tk/knl_main.c \
+    kernel/tk/m5_tk_task.c \
+    kernel/tk/m6_tick_test.c \
+    kernel/tk/m7_preempt_test.c \
+    kernel/sysdepend/cpu/aarch64/cpu_el1.c \
+    kernel/sysdepend/cpu/aarch64/cpu_init.c \
+    kernel/sysdepend/cpu/aarch64/kernel_exception.c \
+    kernel/sysdepend/cpu/aarch64/kernel_syscall.c \
+    kernel/sysdepend/cpu/aarch64/chkplv.c \
+    kernel/sysdepend/cpu/aarch64/cache.c \
+    kernel/sysdepend/cpu/aarch64/cpu_calls_port.c \
+    kernel/sysdepend/cpu/aarch64/cpu_dispatch_hook.c \
+    kernel/sysdepend/cpu/aarch64/m5b_trace.c \
+    kernel/sysdepend/cpu/aarch64/mmu_a64.c \
+    kernel/sysdepend/device/virt_a64/uart_pl011.c \
+    kernel/sysdepend/device/virt_a64/gic_v3.c \
+    kernel/sysdepend/device/virt_a64/timer_generic.c \
+    kernel/sysdepend/device/virt_a64/psci.c \
+    kernel/sysdepend/device/virt_a64/irq_handler.c \
+    kernel/sysdepend/device/virt_a64/devinit.c \
+    kernel/sysdepend/device/virt_a64/virt_tk_timer.c \
+    kernel/sysdepend/device/virt_a64/poweroff.c \
+    kernel/sysdepend/device/tef_virt_a64/tkdev_init.c \
+    kernel/sysdepend/device/tef_virt_a64/patch.c \
+    kernel/sysdepend/device/tef_virt_a64/power.c \
+    kernel/tk/port/tk_port_boot.c \
+    kernel/tk/port/tk_port_sysconf.c \
+    kernel/tk/port/tk_port_mem.c \
+    kernel/tk/port/tk_port_string.c \
+    kernel/tk/port/tk_port_tm.c \
+    kernel/tk/port/tk_port_scinfo.c \
+    kernel/tk/port/tk_port_api.c \
+    kernel/tk/port/tk_port_stub.c \
+    kernel/tk/port/tk_port_diag.c \
+    kernel/tk/port/tk_port_kernel.c \
+    kernel/tk/port/offset_check.c \
+    kernel/tk/port/tk_port_bitsearch.c \
+    kernel/tk/m8_mmu_test.c \
+    kernel/tk/m9_user_test.c \
+    kernel/tk/m10_multi_user_test.c \
+    kernel/tk/m11_uspace_test.c \
+    kernel/tk/m12_elf_test.c \
+    kernel/sysdepend/cpu/rv64/uspace.c \
+    kernel/sysdepend/cpu/aarch64/a64_stubs.c \
+    kernel/sysdepend/cpu/aarch64/fpu_ctx_a64.c
+
+# 装置・ディスク・Linux 互換層と M13 以降の試験（QEMU virt。実機はまだ入れない）
+SRCS_FULL := \
+    kernel/sysdepend/device/virt_rv64/virtio_blk.c \
+    kernel/sysdepend/device/virt_rv64/virtio_net.c \
+    kernel/sysdepend/device/virt_rv64/virtio_snd.c \
+    kernel/sysdepend/device/virt_rv64/virtio_gpu.c \
+    kernel/sysdepend/device/virt_rv64/pci_virt.c \
+    kernel/usb/xhci.c \
+    kernel/gui/desktop.c \
+    kernel/gui/font16.c \
+    kernel/fs/tarfs.c \
+    kernel/fs/ext2.c \
+    kernel/io/iomgr.c \
+    kernel/io/firmata.c \
+    kernel/io/fdt.c \
+    kernel/io/som_pins.c \
+    kernel/net/net_ip.c \
+    kernel/net/net_tcp.c \
+    $(wildcard kernel/sysdepend/cpu/rv64/linux_*.c) \
+    kernel/sysdepend/cpu/rv64/usys_console.c \
+    kernel/sysdepend/cpu/rv64/usys_file.c \
+    $(sort $(wildcard kernel/tk/m1[3-9]_*.c kernel/tk/m2[0-9]_*.c kernel/tk/m3[0-9]_*.c))
+ifeq ($(BOARD),a733)
+SRCS_C := $(filter-out kernel/sysdepend/device/virt_a64/uart_pl011.c kernel/sysdepend/device/virt_a64/devinit.c,$(SRCS_C)) \
+          kernel/sysdepend/device/a733/uart_16550.c kernel/sysdepend/device/a733/devinit.c
+else
+SRCS_C += $(SRCS_FULL)
+endif
+SRCS_S += kernel/sysdepend/cpu/aarch64/user_mode.S kernel/tk/user/user_prog_a64.S kernel/tk/user/user_blobs_a64.S
+
+OBJS := $(patsubst %.S,$(B)/%.o,$(SRCS_S)) $(patsubst %.c,$(B)/%.o,$(SRCS_C)) \
+        $(addprefix $(B)/tk/,$(TKERNEL_C:.c=.o)) $(B)/lib/libstr_string.o \
+        $(addprefix $(B)/libsys/,$(LIBSYS_C:.c=.o))
+
+INCLUDES := -Iinclude \
+            $(if $(filter a733,$(BOARD)),-Ikernel/sysdepend/device/a733) \
+            -Ikernel/sysdepend/cpu/aarch64 \
+            -Ikernel/sysdepend/device/virt_a64 \
+            -Ikernel/sysdepend/device/tef_virt_a64 \
+            -Ikernel/tk/port \
+            -I$(TKERNEL2_ROOT)/include \
+            -I$(TK_SRC_DIR)
+
+CFLAGS := -march=armv8.2-a -mgeneral-regs-only -ffreestanding -fno-builtin -fno-pic \
+          -fno-stack-protector -Wall -Wextra -O1 -g $(INCLUDES) \
+          -include kernel/tk/port/config.h \
+          -DM5B_TKERNEL -DTK2_TKERNEL -D_TEF_VIRT_A64_ -DTEF_VIRT_A64=1 -DBOARD_GIC_V3 \
+          -DTK2_TEST_EXIT=$(TEST_EXIT) -DTK2_MMU=1 -DTK2_RUN_SH=$(RUN_SH) \
+          $(if $(filter a733,$(BOARD)),-DTK2_LINUX=0 -DTK2_NO_DISK -DTK2_CORE_ONLY -DBOARD_A733,-DTK2_LINUX=1) -MMD -MP
+AFLAGS := $(CFLAGS) -include $(OFFSET_H)
+LDFLAGS := -nostdlib -T $(LDSCRIPT) -Wl,--gc-sections -Wl,-z,max-page-size=4096 -Wl,--no-warn-rwx-segments
+
+QEMU_FLAGS = -machine virt,gic-version=3,highmem-ecam=off,virtualization=$(if $(filter 1,$(EL2)),on,off) \
+              -cpu cortex-a76 -m 512M -nographic -kernel $(TARGET) \
+              -global virtio-mmio.force-legacy=false \
+              -drive file=$(DISK_IMG),if=none,format=raw,id=hd0,readonly=on \
+              -device virtio-blk-device,drive=hd0 \
+              -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-device,netdev=n0 \
+              -audiodev none,id=snd0 -device virtio-sound-device,audiodev=snd0 \
+              -device virtio-gpu-device $(if $(filter 1,$(GUI)),,-display none) \
+              -drive file=$(B)/data.img,if=none,format=raw,id=data0 -device virtio-blk-device,drive=data0 \
+              -device qemu-xhci,id=xhci,p2=8,p3=4 -device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 \
+              -drive file=$(B)/usb.img,if=none,format=raw,id=usb0 -device usb-storage,bus=xhci.0,drive=usb0 \
+              $(USBIO_ARGS)
+
+# USB の I/O ボード（Firmata）の模擬: python3 があれば tools/firmata_sim.py を QEMU の usb-serial につなぐ（USBIO=0 で消せる）
+USBIO ?= $(if $(shell command -v python3 2>/dev/null),1,0)
+FIRMATA_SOCK ?= /tmp/tamazusa-firmata-a64-$(shell id -u).sock
+ifeq ($(USBIO),1)
+  USBIO_ARGS := -chardev socket,id=fm0,path=$(FIRMATA_SOCK),server=on,wait=off -device usb-serial,chardev=fm0,bus=xhci.0
+endif
+
+.PHONY: all run clean
+.DEFAULT_GOAL := all
+
+# ユーザープログラム（ELF）: user/名前/名前.c を 1 つずつ ELF にする（build-a64/user/名前.elf）
+USER_CFLAGS := -march=armv8.2-a -ffreestanding -fno-builtin -fno-pic -no-pie -static -nostdlib \
+               -fno-stack-protector -O1 -Wall -Wextra -Iuser/lib
+USER_DEPS   := user/lib/crt0_a64.S user/lib/usys.h user/lib/ulib.h user/user_a64.ld
+USER_PROGS  := hello fsdemo sh cat
+define USER_PROG_RULE
+$(B)/user/$(1).elf: user/$(1)/$(1).c $$(USER_DEPS)
+	@mkdir -p $(B)/user
+	$$(CC) $$(USER_CFLAGS) -T user/user_a64.ld -Wl,-z,max-page-size=4096 -Wl,--build-id=none \
+	  -o $(B)/user/$(1).full.elf user/lib/crt0_a64.S user/$(1)/$(1).c
+	$$(CROSS)objcopy --strip-all $(B)/user/$(1).full.elf $$@
+endef
+$(foreach p,$(USER_PROGS),$(eval $(call USER_PROG_RULE,$(p))))
+
+$(B)/kernel/tk/user/user_blobs_a64.o: $(B)/user/hello.elf
+
+# Linux 用のプログラム（musl で静的リンク）。musl は tools/build_musl_a64.sh で用意する
+#   見つからなければ作らない（M18 は SKIP と表示）
+MUSL_GCC ?= $(firstword $(wildcard toolchain/musl-a64/bin/musl-gcc))
+LINUX_PROGS := hello_musl fpvec_test fstest proctest sigtest nettest ptytest basic wltest iotest
+ifneq ($(MUSL_GCC),)
+LINUX_ELFS := $(addprefix $(B)/user/,$(addsuffix .elf,$(LINUX_PROGS)))
+$(B)/user/basic.elf: user/linux/sjis_table.h include/vio_sim.h include/iomgr_core.h
+$(B)/user/%.elf: user/linux/%.c
+	@mkdir -p $(B)/user
+	$(MUSL_GCC) -static -O2 -Wall -o $@ $<
+else
+LINUX_ELFS :=
+$(info NOTE: musl (toolchain/musl-a64) がないので Linux 用プログラムは作りません。tools/build_musl_a64.sh で用意できます)
+endif
+
+# busybox（AArch64 の Linux 用、musl で静的リンク）。tools/build_busybox_a64.sh で用意する
+BUSYBOX_BIN   := $(wildcard toolchain/busybox-a64/busybox)
+BUSYBOX_LINKS := $(wildcard toolchain/busybox-a64/busybox.links)
+BASH_BIN      := $(wildcard toolchain/bash-a64/bash)
+DROPBEAR_BIN  := $(wildcard toolchain/dropbear-a64/dropbear)
+DISK_EXTRA    := $(if $(BUSYBOX_BIN),busybox.elf) $(if $(BUSYBOX_LINKS),busybox.links) $(if $(BASH_BIN),bash.elf) \
+                 $(if $(DROPBEAR_BIN),dropbear.elf dropbear.links)
+
+# 仮想ディスク（tar）: AArch64 用のユーザープログラムとテスト用のファイル
+DISK_IMG  := $(B)/disk.img
+DISK_ELFS := $(addprefix $(B)/user/,$(addsuffix .elf,$(USER_PROGS))) $(LINUX_ELFS)
+$(DISK_IMG): $(DISK_ELFS) user/disk/readme.txt user/disk/hello.sh user/disk/catself user/disk/sshd $(wildcard user/disk/etc/*) $(wildcard user/disk/bas/*) $(BUSYBOX_BIN) $(BUSYBOX_LINKS) $(BASH_BIN) $(DROPBEAR_BIN)
+	rm -rf $(B)/diskroot && mkdir -p $(B)/diskroot
+	cp $(DISK_ELFS) user/disk/readme.txt user/disk/hello.sh user/disk/catself user/disk/sshd $(B)/diskroot/
+	chmod 755 $(B)/diskroot/hello.sh $(B)/diskroot/catself $(B)/diskroot/sshd
+	cp -r user/disk/etc $(B)/diskroot/etc
+	cp -r user/disk/bas $(B)/diskroot/bas
+	$(if $(BUSYBOX_BIN),cp $(BUSYBOX_BIN) $(B)/diskroot/busybox.elf)
+	$(if $(BUSYBOX_LINKS),cp $(BUSYBOX_LINKS) $(B)/diskroot/busybox.links)
+	$(if $(BASH_BIN),cp $(BASH_BIN) $(B)/diskroot/bash.elf)
+	$(if $(DROPBEAR_BIN),cp $(DROPBEAR_BIN) $(B)/diskroot/dropbear.elf)
+	$(if $(DROPBEAR_BIN),cp toolchain/dropbear-a64/dropbear.links $(B)/diskroot/)
+	tar --format=ustar --owner=0 --group=0 --numeric-owner --mtime=@0 \
+	  -C $(B)/diskroot -cf $@ $(notdir $(DISK_ELFS)) readme.txt hello.sh catself sshd etc bas $(DISK_EXTRA)
+
+ifeq ($(BOARD),a733)
+# U-Boot の booti で読む形（先頭に Linux の arm64 の見出し。reset.S）
+all: $(OFFSET_H) $(TARGET) $(B)/Image
+$(B)/Image: $(TARGET)
+	$(CROSS)objcopy -O binary $< $@
+	@echo "Image: $@（SD カードの FAT の区画に置き、U-Boot で fatload して booti）"
+else
+all: $(OFFSET_H) $(TARGET) $(DISK_IMG)
+endif
+
+$(B)/offset_vals.s: kernel/tk/port/offset_vals.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -S -o $@ $<
+
+# offset.h: offset_vals.c をアセンブリにして、各値（.xword）を読む（RISC-V 版の Makefile と同じやり方）
+$(OFFSET_H): $(B)/offset_vals.s
+	@set -e; \
+	off() { awk -v sym="off_export_$$1" '$$0 ~ ("^" sym ":") { getline; print $$2; exit }' $<; }; \
+	for k in tskid tskatr state reqdct tskctxb CTXB_uatb CTXB_lsid CTXB_svc_ssp; do \
+	  v=$$(off $$k); test -n "$$v" || { echo "ERROR: offset.h: missing off_export_$$k"; exit 1; }; \
+	done; \
+	{ \
+	  echo "/* AUTO-GENERATED - do not edit */"; \
+	  echo "#ifndef _OFFSET_"; echo "#define _OFFSET_"; \
+	  echo "#define TCB_tskid $$(off tskid)"; \
+	  echo "#define TCB_tskatr $$(off tskatr)"; \
+	  echo "#define TCB_state $$(off state)"; \
+	  echo "#define TCB_reqdct $$(off reqdct)"; \
+	  echo "#define TCB_tskctxb $$(off tskctxb)"; \
+	  echo "#define CTXB_ssp 0"; \
+	  echo "#define CTXB_uatb $$(off CTXB_uatb)"; \
+	  echo "#define CTXB_lsid $$(off CTXB_lsid)"; \
+	  echo "#define CTXB_svc_ssp $$(off CTXB_svc_ssp)"; \
+	  echo "#define TA_FPU 0"; \
+	  echo "#endif"; \
+	} > $@.tmp && mv -f $@.tmp $@; \
+	echo "Generated $@"
+
+$(B)/%.o: %.S $(OFFSET_H)
+	@mkdir -p $(dir $@)
+	$(CC) $(AFLAGS) -c -o $@ $<
+
+$(B)/%.o: %.c $(OFFSET_H)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -c -o $@ $<
+
+$(B)/tk/%.o: $(TK_SRC_DIR)/%.c $(OFFSET_H)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -c -o $@ $<
+
+$(B)/lib/libstr_string.o: $(TKERNEL2_ROOT)/lib/libstr/src/string.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -c -o $@ $<
+
+$(B)/libsys/%.o: $(TKERNEL2_ROOT)/lib/libsys/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -c -o $@ $<
+
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS)
+	$(SIZE) $@
+	@echo "Built: $@"
+
+$(B)/data.img:
+	@mkdir -p $(B)
+	truncate -s 64M $@
+	PATH="$$PATH:/sbin:/usr/sbin" mke2fs -q -F -t ext2 -b 4096 -I 256 -O ^dir_index -L tamazusa-data $@
+
+$(B)/usb.img:
+	@mkdir -p $(B)
+	truncate -s 16M $@
+	printf 'TAMAZUSA USB MEMORY TEST IMAGE\n' | dd of=$@ conv=notrunc status=none
+
+run: all $(B)/data.img $(B)/usb.img
+	@if [ "$(USBIO)" = "1" ]; then rm -f $(FIRMATA_SOCK); python3 tools/firmata_sim.py $(FIRMATA_SOCK) > $(B)/firmata_sim.log 2>&1 & fi
+	qemu-system-aarch64 $(QEMU_FLAGS)
+
+clean:
+	rm -rf $(B) $(OFFSET_H)
+
+-include $(OBJS:.o=.d)

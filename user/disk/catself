@@ -1,0 +1,2 @@
+#!/bin/cat
+printed-by-cat: this file runs with cat as the interpreter

@@ -1,0 +1,47 @@
+Third-Party Notices
+===================
+
+T-Kernel 2.0 (when linked or derived from official sources)
+----------------------------------------------------------
+  Product:  T-Kernel 2.0 Software Package
+  Rights:   Copyright (c) Ken Sakamura / TRON Forum
+  License:  T-License 2.2
+  Source:   https://github.com/tron-forum/tkernel_2
+  License text (reference): docs/TEF000-219-200401.pdf in the tkernel_2 repository
+
+  This RV64 (QEMU virt) and AArch64 ports are NOT official TRON Forum board support packages.
+  Files taken from tkernel_2 must retain their original copyright and
+  license notices.
+
+Toolchain / runtime (used to build and run, not shipped as part of the port)
+---------------------------------------------------------------------------
+  - GCC (aarch64-linux-gnu or aarch64-none-elf), QEMU, GNU ld — respective licenses
+  - See your distribution or toolchain vendor for details.
+
+T88-BASIC (part of this repository, but under different terms)
+--------------------------------------------------------------
+  Rights:   Copyright (c) 2026 Hideyuki Kishida
+  License:  PolyForm Noncommercial License 1.0.0 (NOT the MIT License)
+  Files:    user/windows/, user/linux/basic.c and related files
+  Text:     user/windows/LICENSE.txt, docs/licenses/
+  Note:     N88-BASIC is a product of NEC Corporation. T88-BASIC is an
+            independent implementation and is not affiliated with NEC.
+
+GNU Unifont (screen font used by T88-BASIC)
+-------------------------------------------
+  License:  SIL Open Font License 1.1 (docs/licenses/OFL-1.1.txt)
+
+Components included in the distributed disk image
+-------------------------------------------------
+These are built from upstream sources under toolchain/ (not tracked in this
+repository). When an image containing them is distributed, the license text
+and, where required, the corresponding source must be provided with it.
+  - musl libc ........ MIT
+  - Dropbear ......... MIT-style (ssh client and server; the server is not
+                       started by default)
+  - BusyBox .......... GNU GPL v2
+  - GNU bash ......... GNU GPL v3
+The GPL components are separate programs. They are not combined with the
+MIT-licensed or PolyForm-licensed code of this repository into one program.
+No SSH host key is included in the image; a key is created when sshd is
+first started.

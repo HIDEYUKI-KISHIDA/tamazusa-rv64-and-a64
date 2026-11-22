@@ -1,0 +1,25 @@
+10 ' GREEN.BAS  ビニールハウスの見張り（仮想の機器で動く）
+20 ' 1 秒ごとに温度・水位を見て、ヒーター・ファン・ポンプを入れたり切ったりする
+30 ' 安全のため、2 秒何も出さなければ止まる（ウォッチドッグ）。Q で終わる
+40 CLS: ESTOP 0: WATCHDOG 2000
+50 ON TIMER(1) GOSUB 200
+60 TIMER ON
+70 DO
+80   K$=INKEY$
+90   SLEEP 50
+100 LOOP UNTIL K$="q" OR K$="Q"
+110 TIMER OFF: PWM 0,0: PWM 1,0: PWM 2,0: WATCHDOG 0
+120 PRINT "おわり": END
+200 ' ---- 1 秒ごとの見回り
+210 T=SENSOR(0): W=SENSOR(2)
+220 SELECT CASE T
+230 CASE IS < 24: CALL SETHEAT(100, 0)
+240 CASE 24 TO 27: CALL SETHEAT(30, 0)
+250 CASE ELSE: CALL SETHEAT(0, 100)
+260 END SELECT
+270 IF W < 400 THEN PWM 2,100 ELSE IF W > 600 THEN PWM 2,0
+280 LOCATE 0,0: PRINT USING "温度 ##.#℃  水位 ####mm  ヒーター ###%  ファン ###%  ポンプ ###%"; T; W; PWM(0); PWM(1); PWM(2)
+290 RETURN
+300 SUB SETHEAT(H, F)
+310   PWM 0,H: PWM 1,F
+320 END SUB

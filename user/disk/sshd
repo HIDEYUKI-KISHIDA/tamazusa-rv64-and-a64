@@ -1,0 +1,12 @@
+#!/bin/sh
+# Tamazusa の sshd を起動する（既定では起動しない。使う人が自分で動かす）
+#   パソコンからは ssh -p 2222 root@localhost（パスワードは tamazusa。使う前に変えること）
+# ホスト鍵はイメージに入れていない。無ければ、書き込めるディスク /data に作る。
+# （/tmp には作れない: dropbearkey が使うハードリンクが、メモリ上の /tmp にまだ無いため）
+DIR=/data/etc/dropbear
+KEY=$DIR/dropbear_ed25519_host_key
+if [ ! -f "$KEY" ]; then
+  mkdir -p "$DIR" && dropbearkey -t ed25519 -f "$KEY" >/dev/null 2>&1
+fi
+[ -f "$KEY" ] || { echo "sshd: ホスト鍵を作れません（/data が使えるか確かめる）" >&2; exit 1; }
+exec dropbear -p 22 -r "$KEY" -P /dev/null "$@"
